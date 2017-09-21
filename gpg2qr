@@ -1,0 +1,211 @@
+#!/bin/sh -e
+
+## Manage arguments.
+##
+## By default standard input / output are used. PDF format is used for standard
+## output in order to write all pages in one file.
+input="-"
+output="pdf:-"
+
+while getopts "i:o:" opt
+do
+	case "${opt}" in
+		i) input=${OPTARG} ;;
+		o) output=${OPTARG} ;;
+		*) cat >&2 << EOF
+usage: ${0##*/} [OPTIONS]
+OpenPGP to QR code converter
+
+  -i INPUT        Read the input from this file instead of standard-input.
+  -o OUTPUT       Redirect output to this file instead of standard-output.
+EOF
+		exit 1 ;;
+	esac
+done
+
+## Manage the temporary directory.
+##
+## In modern Linux systems /dev/shm is a tmpfs mount available for unprivileged
+## users. The /tmp directory is used as backup.
+##
+## The temporary directory is removed at exit.
+tmp=$(test -d /dev/shm && TMPDIR=/dev/shm mktemp -d)
+
+trap "rm -r ${tmp}" EXIT
+
+chmod 700 ${tmp} && mkdir ${tmp}/data ${tmp}/page ${tmp}/qr
+
+# First, read the input, convert it and extract the needed informations.
+cat ${input} > ${tmp}/data.raw
+
+gpg --dearmor < ${tmp}/data.raw > ${tmp}/data.gpg
+
+gpg --list-packets < ${tmp}/data.gpg > ${tmp}/data.info 2>/dev/null
+
+## The input data can be a secret key or a revocation certificate. For each
+## types, get the needed informations and generate the data payload.
+##
+## To encode and decode QR codes qrencode(1) and zbarimg(1) are used. But they
+## have issues with binaries data and null characters. So, base64(1) is used
+## to convert the payload in ASCII characters.
+if test $(grep -c "secret key" ${tmp}/data.info) = 1
+then
+	type="This is a secret key"
+
+	keyid=$(gawk '/:secret key packet:/,/keyid:/ \
+		{k = $NF} END {print k}' ${tmp}/data.info)
+
+	info=$(gawk 'BEGIN {FS = "\""} /:user ID packet:/ \
+		{print $(NF-1)}' ${tmp}/data.info)
+
+	## As is, the secret key have a lot of informations that are also
+	## available in the corresponding public key. In order to reduce the
+	## payload size paperkey(1) is used.
+	paperkey --secret-key ${tmp}/data.gpg --output-type raw | \
+		base64 --wrap 0 > ${tmp}/data.b64
+
+elif test $(grep -c "revocation" ${tmp}/data.info) = 1
+then
+	type="This is a revocation certificate"
+
+	keyid=$(gawk '/:signature packet:/,/keyid/ \
+		{k = $NF} END {print k}' ${tmp}/data.info)
+
+	info=$(gawk 'match($0, /\(revocation (.*)\)/, a) \
+		{print a[1]}' ${tmp}/data.info)
+
+	cat ${tmp}/data.gpg | base64 --wrap 0 > ${tmp}/data.b64
+
+else
+	echo >&2 "Invalid input data"
+	exit 1
+fi
+
+## The data payload, even reduced, cannot fit in only one QR code. It must be
+## split into multiple QR codes. Small QR codes are used to increase read back
+## success using zbarimg(1). The used QR codes are:
+##
+##  - Version: 6
+##  - Modules: 41 by 41
+##  - ECC level: H
+##  - Max binary: 58
+##
+## http://www.qrcode.com/en/about/version.html
+##
+## To be able to assemble them back successfully, 2 headers are added in each
+## parts in order to add index and size informations. Both headers are 3 bytes
+## hexadecimal numbers.
+##
+##  <index: 000> + <size: 01B> + <payload: 52 maximum bytes>
+##  <index: 001> + <size: 01B> + <payload: 52 maximum bytes>
+##  ...
+##  <index: 01A> + <size: 01B> + <payload: 52 maximum bytes>
+
+# Begin by splitting the payload in equal parts.
+(cd ${tmp}/data && \
+	split --numeric-suffixes --suffix-length 4 \
+		--bytes 52 ${tmp}/data.b64 data)
+
+size=$(printf "%3.3X" $(ls -1 --hide-control-chars \
+				${tmp}/data/data* | wc --lines))
+
+# Add the index header for each parts.
+for data in ${tmp}/data/data*
+do
+	## seq(1) is used to remove the leading '0'. Else the decimal
+	## number is interpreted as octal number.
+	index=$(printf "%3.3X" $(seq ${data##*data} ${data##*data}))
+
+	sed -i "s:^:"${index}${size}":" ${data}
+done
+
+# Create QR codes from the payload parts.
+for data in ${tmp}/data/data*
+do
+	qr=${tmp}/qr/qr${data##*data}
+
+	## The generated pictures have no margin and each module is a square of
+	## 10 pixels wide. So, the final picture size is 410 by 410 pixels.
+	## A 300 dpi density is chosen for better rendering when printing.
+	qrencode --symversion 6 --level H --8bit \
+		--dpi 300 --margin 0 --size 10 \
+		--output ${qr} < ${data}
+
+	# Check back the created QR code.
+	zbarimg --set disable --set qrcode.enable --quiet --raw ${qr} | \
+		gawk '{printf "%s", $0}' > ${data}~
+
+	diff ${data} ${data}~ >/dev/null 2>&1
+done
+
+## Create the final QR code montages. The layout is 4 by 5, so there is 20
+## QR codes per page. If the input data needs more than 20 QR codes, multiple
+## pages will be created.
+##
+## A 84 pixels gutter is added around all QR codes for easy scanning. The final
+## picture size is 2312 by 2890 pixels. The 300 dpi density is kept.
+montage -density 300 -geometry 410x410+84+84 \
+	-tile 4x5 ${tmp}/qr/* png:${tmp}/page/qr%d
+
+total=$(ls -1 --hide-control-chars ${tmp}/page/qr* | wc --lines)
+
+# Create the final pages.
+for qr in ${tmp}/page/qr*
+do
+	number=$((${qr##*qr} + 1))
+
+	page=${tmp}/page/page${number}
+
+	## Each page have a header with the data type and some informations.
+	## The final page format is A4 at 300dpi that is 2480 by 3508 pixels.
+	convert -density 300 -size 2480x3508 xc:white \
+		\( -size 1360x80 -gravity west label:"${type}" \) \
+			-gravity northwest -geometry +168+189 -composite \
+		\( -size 500x80 -gravity west \
+			label:"Page ${number} of ${total}" \) \
+			-gravity northwest -geometry +168+349 -composite \
+		\( -size 680x80 -gravity east label:"${keyid}" \) \
+			-gravity northwest -geometry +1632+189 -composite \
+		\( -size 1540x80 -gravity east label:"${info}" \) \
+			-gravity northwest -geometry +772+349 -composite \
+		${qr} -geometry +84+534 -composite png:${page}
+done
+
+## Check back the created pages.
+##
+## When reading multiple QR codes, zbarimg(1) does not keep the page order.
+## They must be put back in order before assembling them.
+zbarimg --set disable --set qrcode.enable --quiet --raw ${tmp}/page/page* | \
+	gawk '{
+		i = strtonum("0x" substr($0, 0, 3));
+		s = strtonum("0x" substr($0, 4, 3));
+
+		if (i >= s) {
+			print "Invalid index / size pair" > "/dev/stderr";
+			exit 1;
+		} else if (size != 0 && size != s) {
+			print "Invalid size" > "/dev/stderr";
+			exit 1;
+		} else if (table[i] != 0) {
+			print "Invalid index" > "/dev/stderr";
+			exit 1;
+		} else {
+			table[i] = substr($0, 7);
+			size = s;
+			read++;
+		}
+	} END {
+		if (size == 0 || size != read) {
+			print "Missing QR codes" > "/dev/stderr";
+			exit 1;
+		}
+
+		for (i = 0; i < size; i++) {
+			printf("%s", table[i]);
+		}
+	}' > ${tmp}/data.b64~
+
+diff ${tmp}/data.b64 ${tmp}/data.b64~ >/dev/null 2>&1
+
+# Finally, convert all the pages to the wanted output.
+convert ${tmp}/page/page* ${output}
