@@ -1,0 +1,106 @@
+#!/bin/sh -e
+
+## Manage arguments.
+##
+## By default standard input / output are used.
+output="/dev/stdout"
+
+while getopts "o:p:" opt
+do
+	case "${opt}" in
+		o) output=${OPTARG} ;;
+		p) public=${OPTARG} ;;
+		*) cat >&2 << EOF
+usage: ${0##*/} [OPTIONS]
+QR code to OpenPGP converter
+
+  -o OUTPUT       Redirect output to this file instead of standard-output.
+  -p PUBLIC       File to read public key information from.
+EOF
+		exit 1 ;;
+	esac
+done
+
+## Manage the temporary directory.
+##
+## In modern Linux systems /dev/shm is a tmpfs mount available for unprivileged
+## users. The /tmp directory is used as backup.
+##
+## The temporary directory is removed at exit.
+tmp=$(test -d /dev/shm && TMPDIR=/dev/shm mktemp -d)
+
+trap "rm --recursive ${tmp}; pkill --parent $$" EXIT
+
+chmod 700 ${tmp}
+
+## Read all the QR codes and reassemble them using the headers.
+##
+##  <index: 000> + <size: 01B> + <payload>
+##  <index: 001> + <size: 01B> + <payload>
+##  ...
+##  <index: 01A> + <size: 01B> + <payload>
+##
+## The resulting data is a base 64 encoded string.
+mkfifo ${tmp}/data.fifo
+
+zbarcam --set disable --set qrcode.enable --raw > ${tmp}/data.fifo &
+
+gawk '	{
+		i = strtonum("0x" substr($0, 0, 3));
+		s = strtonum("0x" substr($0, 4, 3));
+
+		if (i >= s) {
+			print "Invalid index / size pair" > "/dev/stderr";
+			exit 1;
+		} else if (size != 0 && size != s) {
+			print "Invalid size" > "/dev/stderr";
+			exit 1;
+		} else if (table[i] == 0) {
+			table[i] = substr($0, 7);
+			size = s;
+			read++;
+
+			if (read == size) {
+				print "Got all QR codes" > "/dev/stderr";
+				exit 0;
+			} else {
+				print "Read QR code #" i \
+					" (" read "/" size ")" > "/dev/stderr";
+			}
+		}
+	} END {
+		if (size == 0 || size != read) {
+			print "Missing QR codes" > "/dev/stderr";
+			exit 1;
+		}
+
+		for (i = 0; i < size; i++) {
+			printf("%s", table[i]);
+		}
+	}' < ${tmp}/data.fifo > ${tmp}/data.b64
+
+# Decode the base 64 encoded string.
+base64 --decode ${tmp}/data.b64 > ${tmp}/data.bin
+
+## The input data can be a secret key or a revocation certificate.
+##
+## Revocation certificates are using GPG format and can be output directly.
+##
+## For size optimization, secret keys are using paperkey(1) to reduce the
+## QR code payload. In order to re-create the secret key paperkey(1) use the
+## public data in the public key that are included in the final secret key.
+if gpg --list-packets < ${tmp}/data.bin > ${tmp}/data.info 2>/dev/null
+then
+	cat ${tmp}/data.bin > ${output}
+
+elif test -z "${public}"
+then
+	echo >&2 "A public key is needed"
+	exit 1
+else
+	# Convert the public key.
+	gpg --dearmor < ${public} > ${tmp}/public.gpg
+
+	paperkey --secrets ${tmp}/data.bin --input-type raw \
+		--pubring ${tmp}/public.gpg > ${output}
+fi
