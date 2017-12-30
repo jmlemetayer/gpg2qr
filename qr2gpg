@@ -32,7 +32,7 @@ done
 ## The temporary directory is removed at exit.
 tmp=$(test -d /dev/shm && TMPDIR=/dev/shm mktemp -d)
 
-trap "rm -r ${tmp}" EXIT
+trap "rm --recursive ${tmp}" EXIT
 
 chmod 700 ${tmp}
 

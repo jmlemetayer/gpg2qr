@@ -31,7 +31,7 @@ done
 ## The temporary directory is removed at exit.
 tmp=$(test -d /dev/shm && TMPDIR=/dev/shm mktemp -d)
 
-trap "rm -r ${tmp}" EXIT
+trap "rm --recursive ${tmp}" EXIT
 
 chmod 700 ${tmp} && mkdir ${tmp}/data ${tmp}/page ${tmp}/qr
 
@@ -52,29 +52,35 @@ if test $(grep -c "secret key" ${tmp}/data.info) = 1
 then
 	type="This is a secret key"
 
-	keyid=$(gawk '/:secret key packet:/,/keyid:/ \
-		{k = $NF} END {print k}' ${tmp}/data.info)
+	keyid=$(gawk '
+		/:secret key packet:/,/keyid:/ {k = $NF} END {print k}
+		' ${tmp}/data.info)
 
-	info=$(gawk 'BEGIN {FS = "\""} /:user ID packet:/ \
-		{print $(NF-1)}' ${tmp}/data.info)
+	info=$(gawk 'BEGIN {FS = "\""}
+		/:user ID packet:/ {print $(NF-1)}
+		' ${tmp}/data.info)
 
 	## As is, the secret key have a lot of informations that are also
 	## available in the corresponding public key. In order to reduce the
 	## payload size paperkey(1) is used.
-	paperkey --secret-key ${tmp}/data.gpg --output-type raw | \
-		base64 --wrap 0 > ${tmp}/data.b64
+	paperkey --secret-key ${tmp}/data.gpg \
+		--output-type raw > ${tmp}/data.ppk
+
+	base64 --wrap 0 < ${tmp}/data.ppk > ${tmp}/data.b64
 
 elif test $(grep -c "revocation" ${tmp}/data.info) = 1
 then
 	type="This is a revocation certificate"
 
-	keyid=$(gawk '/:signature packet:/,/keyid/ \
-		{k = $NF} END {print k}' ${tmp}/data.info)
+	keyid=$(gawk '
+		/:signature packet:/,/keyid/ {k = $NF} END {print k}
+		' ${tmp}/data.info)
 
-	info=$(gawk 'match($0, /\(revocation (.*)\)/, a) \
-		{print a[1]}' ${tmp}/data.info)
+	info=$(gawk '
+		match($0, /\(revocation (.*)\)/, a) {print a[1]}
+		' ${tmp}/data.info)
 
-	cat ${tmp}/data.gpg | base64 --wrap 0 > ${tmp}/data.b64
+	base64 --wrap 0 < ${tmp}/data.gpg > ${tmp}/data.b64
 
 else
 	echo >&2 "Invalid input data"
