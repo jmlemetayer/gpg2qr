@@ -85,8 +85,8 @@ base64 --decode ${tmp}/data.b64 > ${tmp}/data.bin
 ## Revocation certificates are using GPG format and can be output directly.
 ##
 ## For size optimization, secret keys are using paperkey(1) to reduce the
-## QR code payload. In order to re-create the secret key paperkey(1) use the
-## public data in the public key that are included in the final secret key.
+## QR code payload. In order to re-create the secret key paperkey(1) use the
+## public data in the public key that are included in the final secret key.
 if gpg --list-packets < ${tmp}/data.bin > ${tmp}/data.info 2>/dev/null
 then
 	cat ${tmp}/data.bin > ${output}

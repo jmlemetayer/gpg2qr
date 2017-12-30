@@ -35,7 +35,7 @@ trap "rm -r ${tmp}" EXIT
 
 chmod 700 ${tmp} && mkdir ${tmp}/data ${tmp}/page ${tmp}/qr
 
-# First, read the input, convert it and extract the needed informations.
+# First, read the input, convert it and extract the needed informations.
 cat ${input} > ${tmp}/data.raw
 
 gpg --dearmor < ${tmp}/data.raw > ${tmp}/data.gpg
@@ -83,7 +83,7 @@ fi
 
 ## The data payload, even reduced, cannot fit in only one QR code. It must be
 ## split into multiple QR codes. Small QR codes are used to increase read back
-## success using zbarimg(1). The used QR codes are:
+## success using zbarimg(1). The used QR codes are:
 ##
 ##  - Version: 6
 ##  - Modules: 41 by 41
@@ -93,7 +93,7 @@ fi
 ## http://www.qrcode.com/en/about/version.html
 ##
 ## To be able to assemble them back successfully, 2 headers are added in each
-## parts in order to add index and size informations. Both headers are 3 bytes
+## parts in order to add index and size informations. Both headers are 3 bytes
 ## hexadecimal numbers.
 ##
 ##  <index: 000> + <size: 01B> + <payload: 52 maximum bytes>
@@ -156,7 +156,7 @@ do
 
 	page=${tmp}/page/page${number}
 
-	## Each page have a header with the data type and some informations.
+	## Each page have a header with the data type and some informations.
 	## The final page format is A4 at 300dpi that is 2480 by 3508 pixels.
 	convert -density 300 -size 2480x3508 xc:white \
 		\( -size 1360x80 -gravity west label:"${type}" \) \
@@ -174,7 +174,7 @@ done
 ## Check back the created pages.
 ##
 ## When reading multiple QR codes, zbarimg(1) does not keep the page order.
-## They must be put back in order before assembling them.
+## They must be put back in order before assembling them.
 zbarimg --set disable --set qrcode.enable --quiet --raw ${tmp}/page/page* | \
 	gawk '{
 		i = strtonum("0x" substr($0, 0, 3));
